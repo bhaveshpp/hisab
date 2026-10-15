@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="gu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#3F51B5">
+  <title>દુકાન હિસાબ</title>
+  <link rel="stylesheet" href="common.css">
+  <script src="common.js"></script>
+  <script src="store.js"></script>
+</head>
+<body>
+  <div id="hdr" class="hdr"></div>
+  <main class="page">
+    <div class="monthbar">
+      <button id="prev" class="mb-btn" type="button" aria-label="પાછલો દિવસ">‹</button>
+      <label class="month-pick"><span id="dayLabel"></span><input id="dayInput" type="date" aria-label="તારીખ પસંદ કરો"></label>
+      <button id="next" class="mb-btn" type="button" aria-label="આગલો દિવસ">›</button>
+    </div>
+    <div class="summary">
+      <div class="sum"><small>વેપાર</small><b id="sInc" class="amt-income">0</b></div>
+      <div class="sum"><small>ખર્ચા</small><b id="sExp" class="amt-expense">0</b></div>
+      <div class="sum"><small>ઉપાડ</small><b id="sInv" class="amt-invest">0</b></div>
+    </div>
+    <div class="net"><span>બચ્યું (વેપાર − ખર્ચા − ઉપાડ)</span><span id="net">0</span></div>
+    <div id="list"></div>
+  </main>
+  <button id="fab" class="fab" type="button" aria-label="એન્ટ્રી ઉમેરો">+</button>
+  <nav id="nav" class="nav"></nav>
+
+<script>
+(() => {
+  'use strict';
+  const A = App;
+  const { $, el, toast } = A;
+  if (!A.requireLogin()) return;
+  if (!A.guard('home')) return;
+  const S = A.store;
+
+  const TABS = {
+    Income:     { fromLbl: 'કેટેગરી (ક્યાંથી)', from: 'cat', toLbl: 'ખાતું (ક્યાં)',  to: 'acc' },
+    Expense:    { fromLbl: 'ખાતું (ક્યાંથી)',  from: 'acc', toLbl: 'કેટેગરી (ક્યાં)', to: 'cat' },
+    Investment: { fromLbl: 'ખાતું (ક્યાંથી)',  from: 'acc', toLbl: 'કેટેગરી (ક્યાં)', to: 'cat' },
+    Transfer:   { fromLbl: 'ખાતું (ક્યાંથી)',  from: 'acc', toLbl: 'ખાતું (ક્યાં)',  to: 'acc' }
+  };
+  const LAST_ACC_KEY = 'dukan_last_account';
+
+  let day = A.ymd(new Date());          // the day on screen (YYYY-MM-DD)
+  let txns = [];
+  let masters = S.masters();
+  let reqId = 0;
+
+  /* ----------------------------- list ----------------------------- */
+  function iconFor(t) {
+    if (t.type === 'Transfer') { const a = masters.accounts.find((x) => x.name === t.account); return a ? a.icon : '🔁'; }
+    const c = masters.categories.find((x) => x.name === t.category && x.type === t.type);
+    return c ? c.icon : '🏷️';
+  }
+  function row(t) {
+    const av = A.amountView(t), st = S.statusOf(t.id);
+    const title = t.note ? t.note.split('\n')[0] : (t.type === 'Transfer' ? 'ટ્રાન્સફર' : t.category);
+    const sub = t.type === 'Transfer' ? t.account + ' → ' + t.to_account : t.category + ' · ' + t.account;
+    const side = st === 'failed' ? el('small', { class: 'st', text: '⚠ Not saved' })
+               : st === 'queued' ? el('small', { text: '⏳ Saving…' })
+               : el('small', { text: A.timeLabel(t.time) });
+    const attrs = { class: 'row' + (st === 'failed' ? ' failed' : ''), type: 'button' };
+    if (A.canEdit('home')) attrs.onclick = () => openTxn(t); else attrs.style = 'cursor:default';
+    return el('button', attrs,
+      el('div', { class: 'ico', text: iconFor(t) }),
+      el('div', { class: 'row-main' }, el('div', { class: 'row-title', text: title }), el('div', { class: 'row-sub', text: sub })),
+      el('div', { class: 'row-side' }, el('div', { class: 'row-amt ' + av.cls, text: av.text }), side));
+  }
+  function render() {
+    $('fab').hidden = !A.canEdit('home');
+    $('dayLabel').textContent = A.dayLabel(day) + (day === A.ymd(new Date()) ? ' · આજ' : '');
+    $('dayInput').value = day;
+    const s = A.totals(txns);
+    $('sInc').textContent = A.money(s.Income); $('sExp').textContent = A.money(s.Expense); $('sInv').textContent = A.money(s.Investment);
+    const net = Math.round((s.Income - s.Expense - s.Investment) * 100) / 100;      // બચ્યું
+    $('net').textContent = (net > 0 ? '+' : '') + A.money(net); $('net').className = net >= 0 ? 'amt-income' : 'amt-expense';
+    const box = $('list'); box.replaceChildren();
+    if (!txns.length) { box.append(el('div', { class: 'empty', text: 'આ દિવસે કોઈ એન્ટ્રી નથી. + દબાવીને ઉમેરો.' })); return; }
+    txns.forEach((t) => box.append(row(t)));
+  }
+
+  /** The whole dataset is cached on the device, so changing the day is instant and never calls the API. */
+  function showDay() { txns = S.dayItems(day); render(); }
+  async function reload(force) {
+    try { await S.load(force); masters = S.masters(); showDay(); }
+    catch (err) { if (!S.view()) $('list').replaceChildren(el('div', { class: 'empty', text: err.message })); else if (force) throw err; }
+  }
+  function go(delta) {
+    const p = day.split('-').map(Number);
+    day = A.ymd(new Date(p[0], p[1] - 1, p[2] + delta));
+    showDay();
+  }
+  $('prev').addEventListener('click', () => go(-1));
+  $('next').addEventListener('click', () => go(1));
+  $('dayInput').addEventListener('change', (e) => { if (/^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) { day = e.target.value; showDay(); } });
+
+  // any local change (add / edit / delete / sync finished / refresh) → redraw from the cache, no API call
+  window.addEventListener('dukan:change', () => { masters = S.masters(); showDay(); });
+
+  /* ------------------------ add / edit popup ------------------------ */
+  let keepNames = [];                  // an old entry may keep an account / category that is now inactive
+  const usable = (x) => x.status !== 'Inactive' || keepNames.indexOf(x.name) >= 0;
+  function optionsFor(kind, type) {
+    if (kind === 'acc') return masters.accounts.filter(usable).map((a) => ({ v: a.name, t: a.icon + ' ' + a.name }));
+    return masters.categories.filter((c) => c.type === type && usable(c)).map((c) => ({ v: c.name, t: c.icon + ' ' + c.name }));
+  }
+  function fillSelect(sel, opts, keep) {
+    sel.replaceChildren(...opts.map((o) => el('option', { value: o.v, text: o.t })));
+    if (keep && opts.some((o) => o.v === keep)) sel.value = keep;
+  }
+
+  function openTxn(edit) {
+    if (edit && !edit.id) { toast('આ એન્ટ્રીનો ID નથી. Script માં fillMissingIds ચલાવો.', 'error'); return; }
+    masters = S.masters();
+    keepNames = edit ? [edit.account, edit.to_account, edit.category] : [];
+    if (!masters.accounts.length) { toast('ખાતા લોડ થાય છે… થોડી વાર પછી પ્રયત્ન કરો.', 'error'); return; }
+    let type = edit ? edit.type : 'Income';            // દુકાનમાં સૌથી વધુ વેપારની એન્ટ્રી
+    let accTouched = !!edit;                            // વેપાર: ખાતું કેટેગરીના ડિફોલ્ટ ખાતા પરથી આવે, પણ હાથે બદલાય તો તે રહે
+
+    const tabs = el('div', { class: 'seg' });
+    const lblFrom = el('label', { class: 'lbl', for: 'fFrom' });
+    const lblTo = el('label', { class: 'lbl', for: 'fTo' });
+    const selFrom = el('select', { id: 'fFrom', class: 'field' });
+    const selTo = el('select', { id: 'fTo', class: 'field' });
+    const amount = el('input', { id: 'fAmt', class: 'field amount', type: 'text', inputmode: 'decimal', placeholder: '0', autocomplete: 'off' });
+    const when = el('input', { id: 'fTime', class: 'field', type: 'datetime-local' });
+    const note = el('textarea', { id: 'fNote', class: 'field', maxlength: '300', placeholder: 'નોંધ (વૈકલ્પિક)' });
+    const save = el('button', { class: 'btn btn-primary', type: 'submit', text: edit ? 'અપડેટ' : 'સેવ' });
+
+    amount.value = edit ? String(edit.amount) : '';
+    when.value = edit ? edit.time : (day === A.ymd(new Date()) ? A.nowLocalInput() : day + 'T' + A.nowLocalInput().slice(11));
+    note.value = edit ? edit.note : '';
+
+    function currentFromTo() {
+      const v = { account: '', category: '', to_account: '' };
+      if (type === 'Income') { v.category = selFrom.value; v.account = selTo.value; }
+      else if (type === 'Transfer') { v.account = selFrom.value; v.to_account = selTo.value; }
+      else { v.account = selFrom.value; v.category = selTo.value; }
+      return v;
+    }
+    function applyDefaultAccount() {
+      if (type !== 'Income' || accTouched) return;
+      const c = masters.categories.find((x) => x.type === 'Income' && x.name === selFrom.value);
+      if (c && c.default_account && [...selTo.options].some((o) => o.value === c.default_account)) selTo.value = c.default_account;
+    }
+    function applyTab(pick) {
+      const cfg = TABS[type];
+      [...tabs.children].forEach((b) => b.classList.toggle('active', b.dataset.t === type));
+      lblFrom.textContent = cfg.fromLbl; lblTo.textContent = cfg.toLbl;
+      pick = pick || {};
+      const acc = pick.account || localStorage.getItem(LAST_ACC_KEY) || '';
+      fillSelect(selFrom, optionsFor(cfg.from, type), cfg.from === 'acc' ? acc : pick.category);
+      fillSelect(selTo, optionsFor(cfg.to, type), cfg.to === 'acc' ? (type === 'Transfer' ? pick.to_account : acc) : pick.category);
+      if (type === 'Transfer' && selTo.value === selFrom.value && selTo.options.length > 1) {
+        selTo.selectedIndex = selFrom.selectedIndex === 0 ? 1 : 0;
+      }
+      if (!edit) { accTouched = false; applyDefaultAccount(); }
+    }
+    selFrom.addEventListener('change', () => applyDefaultAccount());
+    selTo.addEventListener('change', () => { accTouched = true; });
+    A.TYPES.forEach((tp) => tabs.append(el('button', { class: 't-' + tp, type: 'button', 'data-t': tp, text: tp === 'Investment' ? 'Invest' : tp,
+      onclick: () => { const keep = currentFromTo(); type = tp; applyTab({ account: keep.account, to_account: keep.to_account }); } })));
+    applyTab(edit ? { account: edit.account, to_account: edit.to_account, category: edit.category } : null);
+
+    const form = el('form', { novalidate: true });
+    const failed = edit && S.statusOf(edit.id) === 'failed';
+    let close;
+    if (failed) {
+      form.append(el('div', { class: 'errbar' }, 'સેવ ન થયું: ' + S.errorOf(edit.id) + ' ',
+        el('button', { class: 'btn btn-sm', type: 'button', text: 'ફરી પ્રયત્ન', onclick: () => { S.retry(edit.id); close(); } })));
+    }
+    form.append(tabs,
+      el('label', { class: 'lbl', for: 'fAmt', text: 'રકમ' }), amount,
+      el('label', { class: 'lbl', for: 'fTime', text: 'તારીખ અને સમય' }), when,
+      lblFrom, selFrom, lblTo, selTo,
+      el('label', { class: 'lbl', for: 'fNote', text: 'નોંધ' }), note,
+      save);
+    if (edit) {
+      form.append(el('button', { class: 'btn btn-danger', type: 'button', text: 'કાઢી નાખો', onclick: () => {
+        if (!confirm('આ એન્ટ્રી કાઢી નાખવી?')) return;
+        S.deleteTxn(edit); close(); toast('કાઢી નાખ્યું');
+      } }));
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const amt = Number(String(amount.value).replace(/,/g, ''));
+      if (!isFinite(amt) || amt <= 0) { toast('સાચી રકમ લખો.', 'error'); amount.focus(); return; }
+      if (!when.value) { toast('તારીખ અને સમય પસંદ કરો.', 'error'); return; }
+      if (!selFrom.value || !selTo.value) { toast(TABS[type].from === 'cat' || TABS[type].to === 'cat' ? 'કેટેગરી પસંદ કરો (કેટેગરી પેજ પર ઉમેરી શકાય).' : 'ખાતા પસંદ કરો.', 'error'); return; }
+      const f = currentFromTo();
+      if (type === 'Transfer' && f.account === f.to_account) { toast('ક્યાંથી અને ક્યાં ખાતા અલગ હોવા જોઈએ.', 'error'); return; }
+      const fields = { type, amount: amt, time: when.value, note: note.value.trim(), account: f.account, category: f.category, to_account: f.to_account };
+      try { localStorage.setItem(LAST_ACC_KEY, f.account); } catch (_) {}
+      if (edit) S.editTxn(edit, fields); else S.addTxn(fields);
+      close(); toast(edit ? 'અપડેટ થયું' : 'સેવ થયું');
+      // the new/edited entry may belong to another day than the one on screen → follow it
+      const k = fields.time.slice(0, 10);
+      if (k !== day) { day = k; showDay(); }
+    });
+
+    close = A.openSheet(edit ? 'એન્ટ્રી સુધારો' : 'નવી એન્ટ્રી', form);
+    if (!edit) amount.focus();
+  }
+  $('fab').addEventListener('click', () => openTxn(null));
+
+  /* ------------------------------ init ------------------------------ */
+  A.mountHeader('🏪 દુકાન હિસાબ', async () => { await S.resume(); await reload(true); toast('રિફ્રેશ થયું'); });
+  A.mountNav('home');
+  if (S.view()) showDay(); else $('list').replaceChildren(el('div', { class: 'loading', text: 'લોડ થાય છે…' }));
+  S.resume(); reload(false);
+})();
+</script>
+</body>
+</html>
